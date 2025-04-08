@@ -15,7 +15,7 @@ Telegram бот для управления задачами с системой
 
 1. Клонируйте репозиторий:
 ```bash
-git clone <url-репозитория>
+git clone https://github.com/Noychik/TgBot
 cd TgBot
 ```
 
