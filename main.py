@@ -61,7 +61,12 @@ def get_user_tasks(chat_id):
 # Проверка валидности даты и времени дедлайна
 def is_valid_deadline(deadline_datetime):
     now = datetime.now()
-    return deadline_datetime >= now
+    
+    # Если передан datetime.datetime
+    if isinstance(deadline_datetime, datetime):
+        return deadline_datetime > now
+    
+    return False
 
 # Функция для удаления старых выполненных задач
 def cleanup_completed_tasks():
@@ -172,7 +177,7 @@ def check_deadlines():
                             if timedelta(0) <= time_left <= delta:
                                 try:
                                     message = f"⚠️ Напоминание о задаче:\n\n"
-                                    message += f"Задача: {task['description']}\n"
+                                    message += f"Задача: {task['title']}\n"
                                     message += f"Дедлайн: {task['deadline']}\n"
                                     message += f"Осталось времени: {str(time_left).split('.')[0]}"
                                     
@@ -198,6 +203,7 @@ def get_main_keyboard():
     keyboard.add(types.KeyboardButton("Просмотреть список задач"))
     keyboard.add(types.KeyboardButton("Создать новую задачу"))
     keyboard.add(types.KeyboardButton("Отметить задачу как выполненную"))
+    keyboard.add(types.KeyboardButton("Удалить задачу"))
     return keyboard
 
 # Создание клавиатуры с кнопкой возврата в главное меню
@@ -240,6 +246,7 @@ def test_notifications(message):
 @bot.message_handler(func=lambda message: True)
 def handle_messages(message):
     chat_id = message.chat.id
+    current_state = user_states.get(chat_id)
     
     if message.text == "Вернуться в главное меню":
         user_states[chat_id] = None
@@ -251,7 +258,7 @@ def handle_messages(message):
         return
 
     # Если пользователь в процессе создания задачи
-    if user_states.get(chat_id) == 'waiting_for_task_name':
+    if current_state == 'waiting_for_task_name':
         tasks = load_tasks()
         # Получаем информацию о пользователе
         users = load_users()
@@ -286,9 +293,9 @@ def handle_messages(message):
         return
 
     # Если пользователь вводит дату дедлайна
-    if user_states.get(chat_id, {}).get('state') == 'waiting_for_deadline_date':
+    if isinstance(current_state, dict) and current_state.get('state') == 'waiting_for_deadline_date':
         tasks = load_tasks()
-        task_index = user_states[chat_id].get('task_index')
+        task_index = current_state.get('task_index')
         
         if task_index is None or task_index >= len(tasks):
             bot.reply_to(message, "Ошибка: задача не найдена", reply_markup=get_back_to_main_keyboard())
@@ -299,15 +306,18 @@ def handle_messages(message):
             # Если дедлайн не нужен, переходим к настройке уведомлений
             bot.reply_to(
                 message,
-                get_notification_message(user_states[chat_id]['notifications']),
-                reply_markup=get_notification_keyboard(user_states[chat_id]['notifications'])
+                get_notification_message(current_state['notifications']),
+                reply_markup=get_notification_keyboard(current_state['notifications'])
             )
-            user_states[chat_id]['state'] = 'waiting_for_notifications'
+            current_state['state'] = 'waiting_for_notifications'
             return
         else:
             try:
-                deadline_date = datetime.strptime(message.text, '%d.%m.%Y')
-                if not is_valid_deadline(deadline_date):
+                # Преобразуем введенную дату в datetime, устанавливая время на начало дня
+                deadline_date = datetime.strptime(message.text, '%d.%m.%Y').replace(hour=0, minute=0, second=0, microsecond=0)
+                now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                if deadline_date < now:
                     bot.reply_to(
                         message,
                         "Ошибка: Дата дедлайна не может быть в прошлом. Пожалуйста, введите корректную дату в формате ДД.ММ.ГГГГ или напишите 'нет':",
@@ -316,8 +326,8 @@ def handle_messages(message):
                     return
                 
                 # Сохраняем дату и переходим к вводу времени
-                user_states[chat_id]['state'] = 'waiting_for_deadline_time'
-                user_states[chat_id]['date'] = deadline_date
+                current_state['state'] = 'waiting_for_deadline_time'
+                current_state['date'] = deadline_date
                 
                 bot.reply_to(
                     message,
@@ -334,9 +344,9 @@ def handle_messages(message):
                 return
 
     # Если пользователь вводит время дедлайна
-    if isinstance(user_states.get(chat_id), dict) and user_states[chat_id].get('state') == 'waiting_for_deadline_time':
+    if isinstance(current_state, dict) and current_state.get('state') == 'waiting_for_deadline_time':
         tasks = load_tasks()
-        task_index = user_states[chat_id].get('task_index')
+        task_index = current_state.get('task_index')
         
         if task_index is None or task_index >= len(tasks):
             bot.reply_to(message, "Ошибка: задача не найдена", reply_markup=get_back_to_main_keyboard())
@@ -345,15 +355,22 @@ def handle_messages(message):
             
         try:
             deadline_time = datetime.strptime(message.text, '%H:%M').time()
-            deadline_date = user_states[chat_id]['date']
-            deadline_datetime = datetime.combine(deadline_date.date(), deadline_time)
+            deadline_date = current_state['date']
+            deadline_datetime = datetime.combine(deadline_date, deadline_time)
             
             if not is_valid_deadline(deadline_datetime):
-                bot.reply_to(
-                    message,
-                    "Ошибка: Время дедлайна не может быть в прошлом. Пожалуйста, введите корректное время в формате ЧЧ:ММ:",
-                    reply_markup=get_back_to_main_keyboard()
-                )
+                if deadline_datetime.date() == datetime.now().date():
+                    bot.reply_to(
+                        message,
+                        "Ошибка: Время дедлайна не может быть в прошлом. Пожалуйста, введите время позже текущего:",
+                        reply_markup=get_back_to_main_keyboard()
+                    )
+                else:
+                    bot.reply_to(
+                        message,
+                        "Ошибка: Дата дедлайна не может быть в прошлом. Пожалуйста, введите корректное время:",
+                        reply_markup=get_back_to_main_keyboard()
+                    )
                 return
             
             # Сохраняем дедлайн
@@ -361,11 +378,11 @@ def handle_messages(message):
             save_tasks(tasks)
             
             # Переходим к настройке уведомлений
-            user_states[chat_id]['state'] = 'waiting_for_notifications'
+            current_state['state'] = 'waiting_for_notifications'
             bot.reply_to(
                 message,
-                get_notification_message(user_states[chat_id]['notifications']),
-                reply_markup=get_notification_keyboard(user_states[chat_id]['notifications'])
+                get_notification_message(current_state['notifications']),
+                reply_markup=get_notification_keyboard(current_state['notifications'])
             )
             return
         except ValueError:
@@ -377,7 +394,7 @@ def handle_messages(message):
             return
 
     # Если пользователь выбирает задачу для отметки как выполненную
-    if user_states.get(chat_id) == 'waiting_for_task_to_complete':
+    if current_state == 'waiting_for_task_to_complete':
         tasks = load_tasks()
         try:
             task_id = int(message.text)
@@ -417,13 +434,9 @@ def handle_messages(message):
         if not user_tasks:
             bot.reply_to(message, "У вас нет задач", reply_markup=get_back_to_main_keyboard())
         else:
-            response = "Ваши задачи:\n\n"
-            for task in user_tasks:
-                status = "✅" if task['completed'] else "⏳"
-                deadline = f" (дедлайн: {task['deadline']})" if task['deadline'] else ""
-                completed_at = f" (выполнено: {task['completed_at']})" if task.get('completed_at') else ""
-                response += f"{status} {task['id']}. {task['title']}{deadline}{completed_at} (создано: {task['created_at']})\n"
-            bot.reply_to(message, response, reply_markup=get_back_to_main_keyboard())
+            messages = split_into_messages(user_tasks)
+            for msg in messages:
+                bot.reply_to(message, msg, reply_markup=get_back_to_main_keyboard())
     
     elif message.text == "Создать новую задачу":
         user_states[chat_id] = 'waiting_for_task_name'
@@ -443,20 +456,25 @@ def handle_messages(message):
             if not incomplete_tasks:
                 bot.reply_to(message, "У вас нет невыполненных задач", reply_markup=get_back_to_main_keyboard())
             else:
-                response = "Выберите задачу для отметки как выполненную (введите номер):\n\n"
-                for task in incomplete_tasks:
-                    deadline = f" (дедлайн: {task['deadline']})" if task['deadline'] else ""
-                    response += f"{task['id']}. {task['title']}{deadline}\n"
+                messages = split_into_messages(incomplete_tasks, max_chars=3000)
+                for msg in messages:
+                    bot.reply_to(message, msg, reply_markup=get_back_to_main_keyboard())
                 
                 user_states[chat_id] = 'waiting_for_task_to_complete'
-                bot.reply_to(
-                    message,
-                    response,
-                    reply_markup=get_back_to_main_keyboard()
-                )
+    
+    elif message.text == "Удалить задачу":
+        user_tasks = get_user_tasks(chat_id)
+        if not user_tasks:
+            bot.reply_to(message, "У вас нет задач для удаления", reply_markup=get_main_keyboard())
+        else:
+            bot.reply_to(
+                message,
+                "Выберите задачу для удаления:",
+                reply_markup=get_delete_tasks_keyboard(user_tasks)
+            )
     
     else:
-        bot.reply_to(message, "Пожалуйста, используйте кнопки для навигации", reply_markup=get_back_to_main_keyboard())
+        bot.reply_to(message, "Пожалуйста, используйте кнопки для навигации", reply_markup=get_main_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('notif_'))
 def handle_notification_toggle(call):
@@ -535,6 +553,146 @@ def get_notification_keyboard(notifications):
         )
     )
     return keyboard
+
+def get_task_message(task):
+    status = "✅" if task['completed'] else "⏳"
+    deadline = f" (дедлайн: {task['deadline']})" if task['deadline'] else ""
+    completed_at = f" (выполнено: {task['completed_at']})" if task.get('completed_at') else ""
+    return f"{status} {task['id']}. {task['title']}{deadline}{completed_at}\n"
+
+def split_into_messages(tasks, max_chars=3000):
+    messages = []
+    current_message = "Ваши задачи:\n\n"
+    
+    for task in tasks:
+        task_text = get_task_message(task)
+        
+        # Если добавление новой задачи превысит лимит
+        if len(current_message) + len(task_text) > max_chars:
+            messages.append(current_message)
+            current_message = "Ваши задачи (продолжение):\n\n" + task_text
+        else:
+            current_message += task_text
+    
+    if current_message:
+        messages.append(current_message)
+    
+    return messages
+
+def get_delete_tasks_keyboard(tasks, page=0, tasks_per_page=4):
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    start_idx = page * tasks_per_page
+    end_idx = start_idx + tasks_per_page
+    current_tasks = tasks[start_idx:end_idx]
+    
+    # Добавляем кнопки для каждой задачи на текущей странице
+    for task in current_tasks:
+        deadline = f" (дедлайн: {task['deadline']})" if task['deadline'] else ""
+        button_text = f"{task['id']}. {task['title']}{deadline}"
+        keyboard.add(types.InlineKeyboardButton(
+            button_text,
+            callback_data=f"delete_{task['id']}"
+        ))
+    
+    # Добавляем кнопки навигации в одном ряду
+    navigation_buttons = []
+    if page > 0:
+        navigation_buttons.append(
+            types.InlineKeyboardButton("◀️ Предыдущая", callback_data=f"page_{page-1}")
+        )
+    if end_idx < len(tasks):
+        navigation_buttons.append(
+            types.InlineKeyboardButton("Следующая ▶️", callback_data=f"page_{page+1}")
+        )
+    if navigation_buttons:
+        keyboard.row(*navigation_buttons)
+    
+    # Добавляем кнопку возврата в главное меню
+    keyboard.add(types.InlineKeyboardButton("🏠 Главное меню", callback_data="to_main_menu"))
+    
+    return keyboard
+
+def get_confirmation_keyboard(task_id):
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        types.InlineKeyboardButton("Да", callback_data=f"confirm_delete_{task_id}"),
+        types.InlineKeyboardButton("Нет", callback_data="cancel_delete")
+    )
+    return keyboard
+
+# Добавляем новые обработчики callback-запросов
+@bot.callback_query_handler(func=lambda call: call.data.startswith('delete_'))
+def handle_delete_task_selection(call):
+    task_id = int(call.data.split('_')[1])
+    bot.edit_message_text(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text=f"Вы уверены, что хотите удалить задачу?",
+        reply_markup=get_confirmation_keyboard(task_id)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('confirm_delete_'))
+def handle_delete_confirmation(call):
+    task_id = int(call.data.split('_')[2])
+    tasks = load_tasks()
+    chat_id = call.message.chat.id
+    
+    # Находим и удаляем задачу
+    task_to_delete = None
+    for task in tasks:
+        if task['id'] == task_id and task['user_id'] == chat_id:
+            task_to_delete = task
+            break
+    
+    if task_to_delete:
+        tasks.remove(task_to_delete)
+        save_tasks(tasks)
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text="Задача успешно удалена!"
+        )
+        bot.send_message(
+            chat_id,
+            "Вернуться в главное меню:",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        bot.answer_callback_query(call.id, "Ошибка: задача не найдена")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'cancel_delete')
+def handle_delete_cancellation(call):
+    chat_id = call.message.chat.id
+    user_tasks = get_user_tasks(chat_id)
+    bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=call.message.message_id,
+        text="Выберите задачу для удаления:",
+        reply_markup=get_delete_tasks_keyboard(user_tasks)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('page_'))
+def handle_page_navigation(call):
+    page = int(call.data.split('_')[1])
+    chat_id = call.message.chat.id
+    user_tasks = get_user_tasks(chat_id)
+    
+    bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=call.message.message_id,
+        text="Выберите задачу для удаления:",
+        reply_markup=get_delete_tasks_keyboard(user_tasks, page)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'to_main_menu')
+def handle_to_main_menu(call):
+    chat_id = call.message.chat.id
+    bot.delete_message(chat_id, call.message.message_id)
+    bot.send_message(
+        chat_id,
+        "Главное меню:",
+        reply_markup=get_main_keyboard()
+    )
 
 # Запуск бота
 if __name__ == '__main__':
