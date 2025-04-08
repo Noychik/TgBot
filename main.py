@@ -270,35 +270,39 @@ def handle_messages(message):
         }
         tasks.append(new_task)
         save_tasks(tasks)
-        user_states[chat_id] = 'waiting_for_deadline_date'
+        
+        # Переходим к вводу даты
+        user_states[chat_id] = {
+            'state': 'waiting_for_deadline_date',
+            'task_index': len(tasks) - 1,
+            'notifications': {time: False for time in NOTIFICATION_TIMES.keys()}
+        }
+        
         bot.reply_to(
             message,
-            f"Задача '{message.text}' создана! Теперь введите дату дедлайна в формате ДД.ММ.ГГГГ или напишите 'нет' если дедлайн не нужен:",
+            "Введите дату дедлайна в формате ДД.ММ.ГГГГ или напишите 'нет' если дедлайн не нужен:",
             reply_markup=get_back_to_main_keyboard()
         )
         return
 
     # Если пользователь вводит дату дедлайна
-    if user_states.get(chat_id) == 'waiting_for_deadline_date':
+    if user_states.get(chat_id, {}).get('state') == 'waiting_for_deadline_date':
         tasks = load_tasks()
-        # Находим последнюю задачу пользователя
-        user_tasks = [task for task in tasks if task.get('user_id') == chat_id]
-        if not user_tasks:
+        task_index = user_states[chat_id].get('task_index')
+        
+        if task_index is None or task_index >= len(tasks):
             bot.reply_to(message, "Ошибка: задача не найдена", reply_markup=get_back_to_main_keyboard())
             user_states[chat_id] = None
             return
             
-        last_task_index = tasks.index(user_tasks[-1])
-        
         if message.text.lower() == 'нет':
-            tasks[last_task_index]['deadline'] = None
-            save_tasks(tasks)
-            user_states[chat_id] = None
+            # Если дедлайн не нужен, переходим к настройке уведомлений
             bot.reply_to(
                 message,
-                "Задача успешно создана!",
-                reply_markup=get_main_keyboard()
+                get_notification_message(user_states[chat_id]['notifications']),
+                reply_markup=get_notification_keyboard(user_states[chat_id]['notifications'])
             )
+            user_states[chat_id]['state'] = 'waiting_for_notifications'
             return
         else:
             try:
@@ -310,8 +314,11 @@ def handle_messages(message):
                         reply_markup=get_back_to_main_keyboard()
                     )
                     return
-                # Сохраняем дату во временное хранилище
-                user_states[chat_id] = {'state': 'waiting_for_deadline_time', 'date': deadline_date, 'task_index': last_task_index}
+                
+                # Сохраняем дату и переходим к вводу времени
+                user_states[chat_id]['state'] = 'waiting_for_deadline_time'
+                user_states[chat_id]['date'] = deadline_date
+                
                 bot.reply_to(
                     message,
                     "Теперь введите время дедлайна в формате ЧЧ:ММ:",
@@ -349,13 +356,16 @@ def handle_messages(message):
                 )
                 return
             
-            tasks[task_index]['deadline'] = deadline_datetime.strftime('%Y-%m-%d %H:%M')
+            # Сохраняем дедлайн
+            tasks[task_index]['deadline'] = deadline_datetime.strftime('%d.%m.%Y %H:%M')
             save_tasks(tasks)
-            user_states[chat_id] = None
+            
+            # Переходим к настройке уведомлений
+            user_states[chat_id]['state'] = 'waiting_for_notifications'
             bot.reply_to(
                 message,
-                "Задача успешно создана!",
-                reply_markup=get_main_keyboard()
+                get_notification_message(user_states[chat_id]['notifications']),
+                reply_markup=get_notification_keyboard(user_states[chat_id]['notifications'])
             )
             return
         except ValueError:
@@ -447,6 +457,84 @@ def handle_messages(message):
     
     else:
         bot.reply_to(message, "Пожалуйста, используйте кнопки для навигации", reply_markup=get_back_to_main_keyboard())
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('notif_'))
+def handle_notification_toggle(call):
+    chat_id = call.message.chat.id
+    time = call.data.replace('notif_', '')
+    
+    if chat_id not in user_states or not isinstance(user_states[chat_id], dict):
+        bot.answer_callback_query(call.id, "Ошибка: настройки не найдены")
+        return
+        
+    # Переключаем состояние уведомления
+    user_states[chat_id]['notifications'][time] = not user_states[chat_id]['notifications'][time]
+    
+    # Обновляем сообщение с новыми настройками
+    bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=call.message.message_id,
+        text=get_notification_message(user_states[chat_id]['notifications']),
+        reply_markup=get_notification_keyboard(user_states[chat_id]['notifications'])
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == 'save_notifications')
+def handle_save_notifications(call):
+    chat_id = call.message.chat.id
+    
+    if chat_id not in user_states or not isinstance(user_states[chat_id], dict):
+        bot.answer_callback_query(call.id, "Ошибка: настройки не найдены")
+        return
+        
+    # Сохраняем настройки уведомлений в задаче
+    tasks = load_tasks()
+    task_index = user_states[chat_id].get('task_index')
+    
+    if task_index is not None and task_index < len(tasks):
+        tasks[task_index]['notifications'] = user_states[chat_id]['notifications']
+        save_tasks(tasks)
+        
+        # Завершаем создание задачи
+        user_states[chat_id] = None
+        
+        # Отправляем сообщение о завершении
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text="Задача успешно создана!"
+        )
+        bot.send_message(
+            chat_id,
+            "Вы можете создать новую задачу или просмотреть существующие.",
+            reply_markup=get_main_keyboard()
+        )
+    else:
+        bot.answer_callback_query(call.id, "Ошибка: задача не найдена")
+
+def get_notification_message(notifications):
+    message = "Настройте уведомления для задачи:\n\n"
+    for time, enabled in notifications.items():
+        status = "✅" if enabled else "❌"
+        message += f"{time}: {status}\n"
+    return message
+
+def get_notification_keyboard(notifications):
+    keyboard = types.InlineKeyboardMarkup(row_width=1)
+    for time, enabled in notifications.items():
+        status = "✅" if enabled else "❌"
+        keyboard.add(
+            types.InlineKeyboardButton(
+                f"{time}: {status}",
+                callback_data=f"notif_{time}"
+            )
+        )
+    keyboard.add(
+        types.InlineKeyboardButton(
+            "Сохранить настройки",
+            callback_data="save_notifications"
+        )
+    )
+    return keyboard
 
 # Запуск бота
 if __name__ == '__main__':
