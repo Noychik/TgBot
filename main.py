@@ -303,13 +303,13 @@ def handle_messages(message):
             return
             
         if message.text.lower() == 'нет':
-            # Если дедлайн не нужен, переходим к настройке уведомлений
+            # Если дедлайн не нужен, завершаем создание задачи
+            user_states[chat_id] = None
             bot.reply_to(
                 message,
-                get_notification_message(current_state['notifications']),
-                reply_markup=get_notification_keyboard(current_state['notifications'])
+                "Задача успешно создана!",
+                reply_markup=get_main_keyboard()
             )
-            current_state['state'] = 'waiting_for_notifications'
             return
         else:
             try:
@@ -654,7 +654,7 @@ def handle_delete_confirmation(call):
         )
         bot.send_message(
             chat_id,
-            "Вернуться в главное меню:",
+            "Главное меню:",
             reply_markup=get_main_keyboard()
         )
     else:
