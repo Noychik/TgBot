@@ -20,6 +20,15 @@ USERS_FILE = 'users.json'
 # Словарь для хранения отправленных уведомлений
 notifications_sent = {}
 
+# Настройки уведомлений
+NOTIFICATION_TIMES = {
+    '1 день': timedelta(days=1),
+    '12 часов': timedelta(hours=12),
+    '6 часов': timedelta(hours=6),
+    '2 часа': timedelta(hours=2),
+    '30 минут': timedelta(minutes=30)
+}
+
 # Загрузка задач из файла
 def load_tasks():
     if os.path.exists(TASKS_FILE):
@@ -30,19 +39,19 @@ def load_tasks():
 # Сохранение задач в файл
 def save_tasks(tasks):
     with open(TASKS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2)
+        json.dump(tasks, f, ensure_ascii=False, indent=4)
 
 # Загрузка пользователей из файла
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return []
+    return {}
 
 # Сохранение пользователей в файл
 def save_users(users):
     with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+        json.dump(users, f, ensure_ascii=False, indent=4)
 
 # Получение задач пользователя
 def get_user_tasks(chat_id):
@@ -135,58 +144,53 @@ def send_test_notifications(time_delta, message, chat_id=None):
 # Функция для проверки дедлайнов
 def check_deadlines():
     while True:
-        tasks = load_tasks()
-        now = datetime.now()
-        
-        for task in tasks:
-            if task['deadline'] and not task['completed']:
+        try:
+            tasks = load_tasks()
+            users = load_users()
+            current_time = datetime.now()
+            
+            for task in tasks:
+                if task.get('completed', False):
+                    continue
+                
+                # Пропускаем задачи без дедлайна
+                if not task.get('deadline'):
+                    continue
+                    
                 try:
                     # Пробуем разные форматы даты
                     try:
                         deadline = datetime.strptime(task['deadline'], '%Y-%m-%d %H:%M')
                     except ValueError:
-                        deadline = datetime.strptime(task['deadline'], '%Y-%m-%d')
-                    
-                    time_left = deadline - now
-                    
-                    # Определяем временные интервалы для уведомлений
-                    notification_times = {
-                        timedelta(days=1): "1 день",
-                        timedelta(hours=12): "12 часов",
-                        timedelta(hours=6): "6 часов",
-                        timedelta(hours=2): "2 часа",
-                        timedelta(minutes=30): "30 минут",
-                        timedelta(minutes=0): "сейчас"
-                    }
-                    
-                    # Проверяем каждый интервал
-                    for time_delta, message in notification_times.items():
-                        notification_key = f"{task['id']}_{time_delta.total_seconds()}"
+                        deadline = datetime.strptime(task['deadline'], '%d.%m.%Y %H:%M')
                         
-                        # Если уведомление еще не отправлялось и время подходит
-                        if (notification_key not in notifications_sent and 
-                            time_left <= time_delta and 
-                            time_left > timedelta(minutes=-5)):  # Небольшой запас для повторных проверок
-                            
-                            # Отправляем уведомление пользователю задачи
-                            notification = f"⚠️ Напоминание о задаче!\n\n" \
-                                         f"Задача: {task['title']}\n" \
-                                         f"Дедлайн через: {message}"
-                            
-                            user_id = task.get('user_id')
-                            if user_id:
+                    time_left = deadline - current_time
+                    
+                    # Проверяем каждое включенное уведомление
+                    for notif_time, delta in NOTIFICATION_TIMES.items():
+                        if task.get('notifications', {}).get(notif_time, False):
+                            if timedelta(0) <= time_left <= delta:
                                 try:
-                                    bot.send_message(user_id, notification, reply_markup=get_back_to_main_keyboard())
+                                    message = f"⚠️ Напоминание о задаче:\n\n"
+                                    message += f"Задача: {task['description']}\n"
+                                    message += f"Дедлайн: {task['deadline']}\n"
+                                    message += f"Осталось времени: {str(time_left).split('.')[0]}"
+                                    
+                                    bot.send_message(
+                                        task['user_id'],
+                                        message,
+                                        reply_markup=get_back_to_main_keyboard()
+                                    )
                                 except Exception as e:
-                                    print(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
-                            
-                            # Отмечаем, что уведомление отправлено
-                            notifications_sent[notification_key] = True
-                except Exception as e:
-                    print(f"Ошибка обработки задачи {task['id']}: {e}")
+                                    print(f"Ошибка при отправке уведомления: {e}")
+                except ValueError as e:
+                    print(f"Ошибка при обработке дедлайна задачи {task.get('id')}: {e}")
+                    continue
+                
+        except Exception as e:
+            print(f"Ошибка при проверке дедлайнов: {e}")
         
-        # Ждем 5 минут перед следующей проверкой
-        time.sleep(300)
+        time.sleep(60)  # Проверяем каждую минуту
 
 # Создание клавиатуры
 def get_main_keyboard():
@@ -207,22 +211,21 @@ user_states = {}
 
 # Обработчик команды /start
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    chat_id = message.chat.id
-    user_states[chat_id] = None
-    
-    # Сохраняем пользователя
+def start(message):
+    user_id = message.from_user.id
     users = load_users()
-    if not any(user['chat_id'] == chat_id for user in users):
-        users.append({
-            'chat_id': chat_id,
-            'username': message.from_user.username or message.from_user.first_name
-        })
+    
+    if str(user_id) not in users:
+        users[str(user_id)] = {
+            'username': message.from_user.username or 'Unknown',
+            'first_name': message.from_user.first_name or 'Unknown',
+            'last_name': message.from_user.last_name or 'Unknown'
+        }
         save_users(users)
     
     bot.reply_to(
         message,
-        "Привет! Я бот для управления задачами. Что вы хотите сделать?",
+        "Привет! Я бот для управления задачами. Используйте кнопки ниже для работы со мной.",
         reply_markup=get_main_keyboard()
     )
 
@@ -252,8 +255,8 @@ def handle_messages(message):
         tasks = load_tasks()
         # Получаем информацию о пользователе
         users = load_users()
-        user_info = next((user for user in users if user['chat_id'] == chat_id), None)
-        username = user_info['username'] if user_info else 'Unknown'
+        user_info = users.get(str(chat_id), {'username': 'Unknown'})
+        username = user_info.get('username', 'Unknown')
         
         new_task = {
             'id': len(tasks) + 1,
@@ -262,7 +265,8 @@ def handle_messages(message):
             'deadline': None,
             'completed': False,
             'user_id': chat_id,
-            'username': username  # Добавляем имя пользователя к задаче
+            'username': username,
+            'notifications': {time: False for time in NOTIFICATION_TIMES.keys()}
         }
         tasks.append(new_task)
         save_tasks(tasks)
