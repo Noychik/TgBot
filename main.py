@@ -174,20 +174,35 @@ def check_deadlines():
                     # Проверяем каждое включенное уведомление
                     for notif_time, delta in NOTIFICATION_TIMES.items():
                         if task.get('notifications', {}).get(notif_time, False):
+                            # Проверяем, подходит ли задача под временной интервал для уведомления
                             if timedelta(0) <= time_left <= delta:
-                                try:
-                                    message = f"⚠️ Напоминание о задаче:\n\n"
-                                    message += f"Задача: {task['title']}\n"
-                                    message += f"Дедлайн: {task['deadline']}\n"
-                                    message += f"Осталось времени: {str(time_left).split('.')[0]}"
-                                    
-                                    bot.send_message(
-                                        task['user_id'],
-                                        message,
-                                        reply_markup=get_back_to_main_keyboard()
-                                    )
-                                except Exception as e:
-                                    print(f"Ошибка при отправке уведомления: {e}")
+                                # Формируем уникальный ключ для уведомления: id задачи + тип уведомления
+                                notification_key = f"{task['id']}_{notif_time}"
+                                
+                                # Проверяем, было ли уже отправлено это уведомление
+                                if notification_key not in notifications_sent:
+                                    try:
+                                        message = f"⚠️ Напоминание о задаче:\n\n"
+                                        message += f"Задача: {task['title']}\n"
+                                        message += f"Дедлайн: {task['deadline']}\n"
+                                        message += f"Осталось времени: {str(time_left).split('.')[0]}"
+                                        
+                                        bot.send_message(
+                                            task['user_id'],
+                                            message,
+                                            reply_markup=get_back_to_main_keyboard()
+                                        )
+                                        
+                                        # Помечаем уведомление как отправленное
+                                        notifications_sent[notification_key] = current_time
+                                    except Exception as e:
+                                        print(f"Ошибка при отправке уведомления: {e}")
+                            # Если задача вышла за пределы временного окна для уведомления,
+                            # удаляем запись об отправленном уведомлении, чтобы оно могло быть отправлено снова в будущем
+                            elif time_left > delta:
+                                notification_key = f"{task['id']}_{notif_time}"
+                                if notification_key in notifications_sent:
+                                    del notifications_sent[notification_key]
                 except ValueError as e:
                     print(f"Ошибка при обработке дедлайна задачи {task.get('id')}: {e}")
                     continue
